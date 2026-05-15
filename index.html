@@ -601,7 +601,31 @@
             line-height: 1.6;
             white-space: pre-wrap; 
         }
-        
+        /* --- OFFLINE BUTTON STYLES --- */
+        .offline-btn {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 0.2rem;
+            transition: transform 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .offline-btn:hover {
+            transform: scale(1.2);
+        }
+
+        @keyframes spin-pulse {
+            0% { transform: rotate(0deg) scale(0.9); text-shadow: 0 0 5px var(--accent-glow); }
+            50% { transform: rotate(180deg) scale(1.1); text-shadow: 0 0 15px var(--accent-glow); }
+            100% { transform: rotate(360deg) scale(0.9); text-shadow: 0 0 5px var(--accent-glow); }
+        }
+        .loading-indicator {
+            color: var(--accent-glow);
+            animation: spin-pulse 1s linear infinite;
+            display: inline-block;
+        }
         /* --- AI SEO BIO SECTION --- */
         .bio-header { font-size: 1.2rem; color: var(--accent-glow); margin-bottom: 0.5rem; text-transform: uppercase; letter-spacing: 2px; }
         .bio-text { color: var(--text-muted); font-size: 0.95rem; line-height: 1.6; }
@@ -1034,6 +1058,7 @@
             let currentSortMode = 'rating';
             let selectedAlbum = null;
             let myPlaylist = JSON.parse(localStorage.getItem('suncat_playlist')) || [];
+            let offlineTracks = new Set();
             let currentSearchQuery = '';
             const searchInput = document.getElementById('search-bar');
             let activeFilters = {
@@ -1100,6 +1125,7 @@
                     audioCtx.resume();
                 }
             });
+            scanCacheForOfflineTracks();
         }
 
         // --- PROGRESS BAR LOGIC --- //
@@ -1346,7 +1372,17 @@
                 const genreHTML = track.genre 
                     ? `<span class="track-genre"> <span style="color: ${genreColor}; text-shadow: 0 0 8px ${genreColor}; font-size: 1.1em;">●</span> ${track.genre}</span>` 
                     : '';
+                // --- Build the Interactive Offline Button ---
+                const encodedSrc = encodeURI(track.src).replace(/'/g, "%27");
+                const isOffline = offlineTracks.has(track.src);
 
+                const offlineIconOn = `<span style="color: #00e676; text-shadow: 0 0 8px #00e676; font-size: 0.8rem; letter-spacing: 2px;">●↓</span>`;
+                const offlineIconOff = `<span style="color: var(--glass-border); font-size: 0.8rem; letter-spacing: 2px;">○↓</span>`;
+
+                // Inject the button instead of a static span
+                const offlineLight = `<button class="offline-btn" title="${isOffline ? 'Remove from device' : 'Download track'}" data-offline="${isOffline}">
+                    ${isOffline ? offlineIconOn : offlineIconOff}
+                </button>`;
                 // INJECT THE GENRE HTML NEXT TO THE ALBUM
                 trackEl.innerHTML = `
                     <div class="track-info-left">
@@ -1355,6 +1391,7 @@
                         <span class="track-rating">${filledStars}${emptyStars}</span>
                     </div>
                     <div class="track-info-right">
+                        ${offlineLight}
                         <span class="track-duration">${track.duration}</span>
                         <button class="heart-btn ${heartClass}" title="Save to Playlist">${heartIcon}</button>
                         <button class="info-btn" title="Track Info">ℹ️</button>
@@ -1380,6 +1417,47 @@
                 heartBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     togglePlaylist(masterIndex, heartBtn);
+                });
+                const offlineBtn = trackEl.querySelector('.offline-btn');
+                offlineBtn.addEventListener('click', async (e) => {
+                    e.stopPropagation(); // Prevents the track from playing when you click the button
+                    
+                    if (!('caches' in window)) return alert("Offline mode not supported in this browser.");
+
+                    try {
+                        const cache = await caches.open('suncat-audio-v9');
+                        const absoluteUrl = new URL(encodedSrc, window.location.href).href;
+                        
+                        const currentlyOffline = offlineBtn.dataset.offline === "true";
+
+                        if (currentlyOffline) {
+                            // REMOVE TRACK
+                            await cache.delete(absoluteUrl);
+                            offlineTracks.delete(track.src);
+                            
+                            // Update UI to empty circle
+                            offlineBtn.dataset.offline = "false";
+                            offlineBtn.title = "Download track";
+                            offlineBtn.innerHTML = offlineIconOff;
+                            
+                        } else {
+                            // DOWNLOAD TRACK
+                            // Show loading animation
+                            offlineBtn.innerHTML = `<span class="loading-indicator">⏳</span>`;
+                            
+                            // Fetch and save to cache
+                            await cache.add(absoluteUrl);
+                            offlineTracks.add(track.src);
+                            
+                            // Update UI to green neon circle
+                            offlineBtn.dataset.offline = "true";
+                            offlineBtn.title = "Remove from device";
+                            offlineBtn.innerHTML = offlineIconOn;
+                        }
+                    } catch (err) {
+                        console.error("Failed to toggle offline status:", err);
+                        offlineBtn.innerHTML = `<span style="color: red;">❌</span>`; // Error indicator
+                    }
                 });
 
                 playlistContainer.appendChild(trackEl);
@@ -1713,31 +1791,80 @@
                 filterMenu.classList.remove('show');
             }
         });
+        async function scanCacheForOfflineTracks() {
+            if (!('caches' in window)) return;
+            try {
+                const cache = await caches.open('suncat-audio-v9');
+                const keys = await cache.keys();
+                
+                // Grab all cached absolute URLs
+                const cachedUrls = keys.map(req => req.url);
+                
+                offlineTracks.clear();
+                
+                playlistData.forEach(track => {
+                    // Strictly encode the source to match how the cache stores it
+                    const encodedSrc = encodeURI(track.src).replace(/'/g, "%27");
+                    
+                    // If the cache contains a URL ending with this track's file, it's offline ready
+                    if (cachedUrls.some(url => url.endsWith(encodedSrc))) {
+                        offlineTracks.add(track.src);
+                    }
+                });
+                
+                // Re-render the playlist to apply the glowing lights
+                renderPlaylist();
+            } catch (err) {
+                console.error("Failed to scan offline cache:", err);
+            }
+        }
+                
+                // --- OFFLINE DOWNLOAD LOGIC --- //
+        const downloadBtn = document.getElementById('btn-download-all');
+        const dnlStatusBox = document.getElementById('download-status-box');
+        const progressText = document.getElementById('download-progress-text');
+        const percentText = document.getElementById('download-percent');
+        const visualBar = document.getElementById('download-visual-bar');
 
-        
-        // --- OFFLINE DOWNLOAD LOGIC --- //
-            const downloadBtn = document.getElementById('btn-download-all');
-            const dnlStatusBox = document.getElementById('download-status-box');
-            const progressText = document.getElementById('download-progress-text');
-            const percentText = document.getElementById('download-percent');
-            const visualBar = document.getElementById('download-visual-bar');
-
-            // Set Storage Key
-                if (localStorage.getItem('suncat_archive_103') === 'true') {
-                    downloadBtn.innerText = "✅ Archive Available Offline";
-                    downloadBtn.disabled = true;
-                    downloadBtn.classList.remove('active');
-                }
+            // VERIFY ACTUAL CACHE INSTEAD OF TRUSTING LOCALSTORAGE
+            if ('caches' in window) {
+                caches.open('suncat-audio-v9').then(cache => {
+                    cache.keys().then(keys => {
+                        const mp3Count = keys.filter(req => req.url.includes('.mp3')).length;
+                        // If the cache has all the tracks, lock the button
+                        if (mp3Count >= playlistData.length) {
+                            downloadBtn.innerText = "✅ Archive Available Offline";
+                            downloadBtn.disabled = true;
+                            downloadBtn.classList.remove('active');
+                            localStorage.setItem('suncat_archive_103', 'true');
+                        } else {
+                            // The browser evicted the cache! Unlock the UI.
+                            downloadBtn.innerText = "📥 Download All Tracks";
+                            downloadBtn.disabled = false;
+                            downloadBtn.classList.add('active');
+                            localStorage.removeItem('suncat_archive_103');
+                        }
+                    });
+                });
+            } else if (localStorage.getItem('suncat_archive_103') === 'true') {
+                // Fallback if Cache API isn't directly accessible
+                downloadBtn.innerText = "✅ Archive Available Offline";
+                downloadBtn.disabled = true;
+                downloadBtn.classList.remove('active');
+            }
 
             downloadBtn.addEventListener('click', () => {
                 if ('serviceWorker' in navigator) {
                     downloadBtn.disabled = true;
                     downloadBtn.innerText = "Syncing with Worker...";
-                    dnlStatusBox.style.display = "block"; // Show the progress bar
+                    dnlStatusBox.style.display = "block";
 
                     navigator.serviceWorker.ready.then(reg => {
-                        // Send the entire track list from your playlistData to the Service Worker
-                        const allTrackUrls = playlistData.map(track => track.src);
+                        // STRICTLY ENCODE URLS (Handling spaces and apostrophes)
+                        const allTrackUrls = playlistData.map(track => {
+                            return encodeURI(track.src).replace(/'/g, "%27");
+                        });
+                        
                         reg.active.postMessage({ 
                             action: 'START_BULK_DOWNLOAD', 
                             tracks: allTrackUrls 
@@ -1747,7 +1874,7 @@
                     alert("Offline caching is not supported in this browser.");
                 }
             });
-
+            
             // Listen for progress messages from sw.js
             navigator.serviceWorker.addEventListener('message', (event) => {
                 if (event.data.action === 'DOWNLOAD_PROGRESS') {
@@ -1768,6 +1895,7 @@
                         downloadBtn.classList.remove('active');
                         // Change the key here too
                         localStorage.setItem('suncat_archive_103', 'true'); 
+                        scanCacheForOfflineTracks();
                     }
                 }
             });
