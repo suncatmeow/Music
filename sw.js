@@ -1,4 +1,4 @@
-const CACHE_NAME = 'suncat-audio-v8';
+const CACHE_NAME = 'suncat-audio-v9';
 const urlsToCache = [
   './',
   './index.html',
